@@ -36,6 +36,30 @@ The demo-book auto-import (`useDemoBooks`) is suppressed by the base fixture
 so the library is deterministic; authenticated/sync flows are out of scope
 for this lane until a test account is provisioned.
 
+### KOSync identifier matching
+
+`tests/kosync-identifiers.spec.ts` is the one spec that needs a server: a
+KOReader Sync server implementing the optional identifier matching of
+`koreader/koreader-sync-server#55`. It skips unless `KOSYNC_E2E_SERVER` names
+one, and registers a throwaway account per test (an alias is never repointed,
+so a second run over the first run's aliases would assert nothing).
+
+```bash
+KOSYNC_E2E_SERVER=http://kosync.example.test:8095 pnpm test:e2e:web
+```
+
+`KOSYNC_E2E_SERVER` must be a **public** hostname. The web build proxies KOSync
+through `/api/kosync`, whose SSRF guard rejects loopback and private literals
+by design, and a private literal in the setting makes `KOSyncClient` fetch the
+server straight from the page instead — where it fails CORS. A server on
+`127.0.0.1` is therefore addressed through a hostname that resolves there
+(`localtest.me`, `lvh.me`), which leaves the guard untouched and runs the
+request through the route's real endpoint allowlist.
+
+`KOSYNC_E2E_EPUB` names a source book other than the repo's sample; the
+converted copy the matching tests need is built from it at run time by
+`fixtures/epubVariant.ts`.
+
 ## Tauri lane — WebdriverIO
 
 Drives the actual **Tauri** desktop shell via `tauri-driver`. Use this for
