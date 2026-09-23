@@ -319,3 +319,87 @@ describe('KOSyncClient.updateProgress – document metadata', () => {
     expect(metadata['title']).toBe('A Title the Reader Edited');
   });
 });
+
+describe('KOSyncClient – identifier matching', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const content = 'f248ce0f15105ff390e5292085e0622b';
+  const identifiers = [
+    { type: 'content', value: content },
+    { type: 'structure', value: 'fb3ed76af6e07f28456616a77330b19f' },
+    { type: 'filename', value: 'e07ad0e2e24fbaa64b0c40a8b1ebb13f' },
+  ] as const;
+
+  const lastCall = (mock: FetchMock) => mock.mock.calls.at(-1) as [string, RequestInit];
+  const sentUrl = (mock: FetchMock) => lastCall(mock)[0];
+  const sentBody = (mock: FetchMock): Record<string, unknown> =>
+    JSON.parse(lastCall(mock)[1].body as string);
+
+  it('makes the request it always has when no identifiers are offered', async () => {
+    const mock = setFetch(() => jsonResponse(200, {}));
+    const client = new KOSyncClient(makeConfig({ userkey: 'key' }));
+
+    await client.getProgress(makeBook());
+    expect(sentUrl(mock)).toBe(`http://192.168.1.50/syncs/progress/${content}`);
+
+    await client.updateProgress(makeBook(), '/body/DocFragment[12]', 0.14);
+    expect(sentBody(mock)).not.toHaveProperty('identifiers');
+  });
+
+  it('flattens the list into the read`s ids parameter, strongest first', async () => {
+    const mock = setFetch(() => jsonResponse(200, { percentage: 0.5, progress: '0' }));
+    const client = new KOSyncClient(makeConfig({ userkey: 'key' }));
+
+    await client.getProgress(makeBook(), [...identifiers]);
+
+    expect(sentUrl(mock)).toBe(
+      `http://192.168.1.50/syncs/progress/${content}?ids=content:${content}` +
+        ',structure:fb3ed76af6e07f28456616a77330b19f' +
+        ',filename:e07ad0e2e24fbaa64b0c40a8b1ebb13f',
+    );
+  });
+
+  it('sends the list beside the write`s existing fields', async () => {
+    const mock = setFetch(() => jsonResponse(200, {}));
+    const client = new KOSyncClient(makeConfig({ userkey: 'key' }));
+
+    await client.updateProgress(makeBook(), '/body/DocFragment[12]', 0.14, [...identifiers]);
+
+    const body = sentBody(mock);
+    expect(body['identifiers']).toEqual(identifiers);
+    expect(body['document']).toBe(content);
+    expect(body['percentage']).toBe(0.14);
+  });
+
+  it('reports the match the server made', async () => {
+    setFetch(() =>
+      jsonResponse(200, {
+        document: content,
+        progress: '/body/DocFragment[20]/body/p[22]',
+        percentage: 0.32,
+        match: 'structure',
+        progress_match: 'filename',
+      }),
+    );
+    const client = new KOSyncClient(makeConfig({ userkey: 'key' }));
+
+    const progress = await client.getProgress(makeBook(), [...identifiers]);
+    expect(progress).toMatchObject({ match: 'structure', progress_match: 'filename' });
+  });
+
+  // The server answers 403 to a list that does not name the document, so a
+  // plain request beats one that cannot be served.
+  it('drops a list that does not name the document', async () => {
+    const mock = setFetch(() => jsonResponse(200, {}));
+    const client = new KOSyncClient(makeConfig({ userkey: 'key' }));
+
+    await client.getProgress(makeBook(), [{ type: 'filename', value: 'a'.repeat(32) }]);
+
+    expect(sentUrl(mock)).toBe(`http://192.168.1.50/syncs/progress/${content}`);
+  });
+});

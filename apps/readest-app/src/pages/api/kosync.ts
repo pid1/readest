@@ -3,10 +3,17 @@ import { corsAllMethods, runMiddleware } from '@/utils/cors';
 import { isLanAddress } from '@/utils/network';
 import { KoSyncProxyPayload } from '@/types/kosync';
 
+// One `type:value` pair of the optional `ids` parameter, bounded by the
+// patterns the sync server itself enforces on each half. Neither half admits
+// `/`, `@`, `?`, `#` or `&`, so the anchors below still pin the endpoint to a
+// single known path with at most this one parameter — the route forwards to a
+// caller-supplied origin, and an unanchored pattern turns it into an open
+// proxy.
+const ID_PAIR = '[a-z][a-z0-9-]{0,31}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}';
 const validEndpoints = [
   /^\/users\/create$/,
   /^\/users\/auth$/,
-  /^\/syncs\/progress(?:\/[a-fA-F0-9]{32})?$/,
+  new RegExp(`^\\/syncs\\/progress(?:\\/[a-fA-F0-9]{32}(?:\\?ids=${ID_PAIR}(?:,${ID_PAIR})*)?)?$`),
 ];
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

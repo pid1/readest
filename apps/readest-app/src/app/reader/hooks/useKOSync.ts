@@ -6,6 +6,7 @@ import { useBookProgress } from '@/store/readerProgressStore';
 import { useBookDataStore } from '@/store/bookDataStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { KOSyncClient, KoSyncProgress } from '@/services/sync/KOSyncClient';
+import { buildIdentifiers, canFollowPosition } from '@/services/sync/kosyncIdentifiers';
 import { Book, BookProgress, FIXED_LAYOUT_FORMATS } from '@/types/book';
 import type { KOSyncSettings, SystemSettings } from '@/types/settings';
 import { BookDoc } from '@/libs/document';
@@ -21,6 +22,7 @@ import {
 import {
   decideRemoteConflict,
   getRemoteFraction,
+  isFollowablePosition,
   isXPointerProgress,
   resolveRemoteLocalFraction,
   type RemoteFractionResolution,
@@ -110,6 +112,18 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, provider]);
 
+  /**
+   * The names this copy is also known by, strongest first, or undefined when
+   * the user has not opted in.
+   */
+  const getIdentifiers = useCallback(
+    async (config: KosyncEngineConfig, book: Book) =>
+      config.matchIdentifiers
+        ? await buildIdentifiers(book, getBookData(bookKey)?.bookDoc ?? null)
+        : undefined,
+    [bookKey, getBookData],
+  );
+
   const generateKOProgress = useCallback(async () => {
     const progress = getProgress(bookKey);
     const bookData = getBookData(bookKey);
@@ -180,7 +194,17 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
     const bookData = getBookData(bookKey);
     if (!view || !bookData) return false;
 
-    if (FIXED_LAYOUT_FORMATS.has(book.format)) {
+    // A position the server matched on the file name, or on a type this client
+    // does not know, was written against a document that need not share a
+    // single node with this one. The percentage is what carries over. A server
+    // without identifier matching reports nothing here and keeps the path
+    // below.
+    const approximate = !canFollowPosition(remote.progress_match);
+    if (approximate) {
+      const remoteFraction = getRemoteFraction(remote);
+      if (remoteFraction === undefined) return false;
+      view.goToFraction(remoteFraction);
+    } else if (FIXED_LAYOUT_FORMATS.has(book.format)) {
       const pageToGo = parseInt(remote.progress!, 10);
       if (isNaN(pageToGo)) return false;
       view.select(pageToGo - 1);
@@ -220,7 +244,9 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
     }
     eventDispatcher.dispatch('hint', {
       bookKey,
-      message: _('Reading Progress Synced'),
+      message: approximate
+        ? _('Reading Progress Synced (Approximate)')
+        : _('Reading Progress Synced'),
     });
     return true;
   };
@@ -303,7 +329,7 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
       const view = getView(bookKey);
       const resolution: RemoteFractionResolution = view
         ? await resolveRemoteLocalFraction(remote, view, bookDoc)
-        : { status: isXPointerProgress(remote.progress) ? 'unresolved' : 'not-xpointer' };
+        : { status: isFollowablePosition(remote) ? 'unresolved' : 'not-xpointer' };
       const decision = decideRemoteConflict(
         resolution,
         localPercentage,
@@ -341,10 +367,15 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
         if (!currentBook || !progress || !progress.koProgress) return;
 
         console.log('[KOSync] Pushing progress');
-        await kosyncClient.updateProgress(currentBook, progress.koProgress, progress.percentage);
+        await kosyncClient.updateProgress(
+          currentBook,
+          progress.koProgress,
+          progress.percentage,
+          await getIdentifiers(config, currentBook),
+        );
       }, 5000),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bookKey, appService, kosyncClient],
+    [bookKey, appService, kosyncClient, getIdentifiers],
   );
 
   const pullProgress = useCallback(
@@ -367,7 +398,10 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
       }
 
       setSyncState('checking');
-      const remoteProgress = await kosyncClient.getProgress(book);
+      const remoteProgress = await kosyncClient.getProgress(
+        book,
+        await getIdentifiers(config, book),
+      );
       if (!remoteProgress || !remoteProgress.progress) {
         setSyncState('synced');
         return;
@@ -402,7 +436,7 @@ export const useKOSync = (bookKey: string, provider: KosyncProgressProvider = ko
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bookKey, appService, kosyncClient, settings, progress],
+    [bookKey, appService, kosyncClient, settings, progress, getIdentifiers],
   );
 
   // use a ref to track the current push/pull functions so they can change without triggering effects

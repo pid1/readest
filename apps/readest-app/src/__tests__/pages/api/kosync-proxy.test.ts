@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import handler from '@/pages/api/kosync';
+import { KOSyncClient } from '@/services/sync/KOSyncClient';
+import type { Book } from '@/types/book';
+import type { KOSyncSettings } from '@/types/settings';
 
 vi.mock('@/utils/cors', () => ({ corsAllMethods: {}, runMiddleware: vi.fn() }));
+vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }));
 afterEach(() => vi.unstubAllGlobals());
 
 const call = async (
@@ -75,6 +79,80 @@ describe('KOSync proxy boundaries', () => {
     const res = await call(`/syncs/progress/${suffix}`);
     expect(res.status).toHaveBeenCalledWith(400);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('allows the identifier list a progress read carries', async () => {
+    const hash = '0123456789abcdef0123456789abcdef';
+    const endpoint = `/syncs/progress/${hash}?ids=content:${hash},structure:${'b'.repeat(32)},filename:${'c'.repeat(32)}`;
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{"match":"structure"}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await call(endpoint);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://sync.example.com${endpoint}`,
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(res.json).toHaveBeenCalledWith({ match: 'structure' });
+  });
+
+  // The query is admitted as one named parameter of a fixed shape, so it
+  // cannot carry a second parameter, another path segment or an origin.
+  it.each([
+    '?admin=true',
+    '?ids=content:abc&next=admin',
+    '?ids=content:abc#frag',
+    '?ids=../users/auth',
+    '?ids=content:abc/extra',
+    '?ids=',
+    '?ids=content:abc,',
+    '?ids=Content:abc',
+    `?ids=content:${'a'.repeat(129)}`,
+  ])('rejects the query %s on a progress read', async (query) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await call(`/syncs/progress/0123456789abcdef0123456789abcdef${query}`);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an identifier list on a write, which carries them in the body', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await call('/syncs/progress?ids=content:abc');
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Native platforms reach the server directly, so an endpoint this route
+  // rejects fails on the web alone. Take the string the client actually builds
+  // rather than one written out here.
+  it('accepts the endpoint the client builds for an identifier read', async () => {
+    const hash = '0123456789abcdef0123456789abcdef';
+    const proxyFetch = vi.fn().mockResolvedValue(new Response('{"percentage":0.5}'));
+    vi.stubGlobal('fetch', proxyFetch);
+    window.fetch = proxyFetch as unknown as typeof window.fetch;
+    const client = new KOSyncClient({
+      enabled: true,
+      serverUrl: 'https://sync.example.com',
+      username: 'alice',
+      userkey: 'key',
+      deviceId: 'device-1',
+      deviceName: 'Readest',
+      checksumMethod: 'binary',
+      strategy: 'prompt',
+    } as KOSyncSettings);
+
+    await client.getProgress({ hash } as Book, [
+      { type: 'content', value: hash },
+      { type: 'structure', value: 'b'.repeat(32) },
+      { type: 'filename', value: 'c'.repeat(32) },
+    ]);
+    const { endpoint } = JSON.parse(
+      (proxyFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
+    expect(endpoint).toContain('?ids=');
+
+    const res = await call(endpoint);
+    expect(res.status).not.toHaveBeenCalledWith(400);
   });
 
   it('rejects paths merely containing an allowed endpoint', async () => {

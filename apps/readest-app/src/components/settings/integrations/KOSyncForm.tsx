@@ -190,6 +190,13 @@ const KOSyncForm: React.FC<KOSyncFormProps> = ({ onBack }) => {
     await saveSettings(envConfig, newSettings);
   };
 
+  const handleToggleMatchIdentifiers = async () => {
+    const kosync = { ...settings.kosync, matchIdentifiers: !settings.kosync.matchIdentifiers };
+    const newSettings = { ...settings, kosync };
+    setSettings(newSettings);
+    await saveSettings(envConfig, newSettings);
+  };
+
   const description: string = isConfigured
     ? _('Sync as {{userDisplayName}}', { userDisplayName: settings.kosync.username })
     : _('Connect to your KOReader Sync server.');
@@ -251,6 +258,18 @@ const KOSyncForm: React.FC<KOSyncFormProps> = ({ onBack }) => {
                 <Toggle
                   checked={settings.kosync.sendMetadata ?? false}
                   onChange={handleToggleSendMetadata}
+                />
+              </label>
+              {/* Offers a digest over the book's chapter list and one over
+                  its file name alongside the content digest, so a copy that
+                  differs byte-for-byte still finds its place. Servers that
+                  don't implement the extension ignore it. Off by default,
+                  like Send Document Metadata. */}
+              <label className='flex min-h-14 items-center justify-between px-4'>
+                <SettingLabel>{_('Match Other Copies')}</SettingLabel>
+                <Toggle
+                  checked={settings.kosync.matchIdentifiers ?? false}
+                  onChange={handleToggleMatchIdentifiers}
                 />
               </label>
               <div className='-me-2 flex min-h-14 items-center justify-between gap-3 px-4'>

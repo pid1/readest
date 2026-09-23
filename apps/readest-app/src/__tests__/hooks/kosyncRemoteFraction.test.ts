@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BookDoc } from '@/libs/document';
 import type { FoliateView } from '@/types/view';
-import { getRemoteLocalFraction } from '@/app/reader/hooks/kosyncProgress';
+import { getRemoteLocalFraction, isFollowablePosition } from '@/app/reader/hooks/kosyncProgress';
 import { getCFIFromXPointer } from '@/utils/xcfi';
 
 // The XPointer↔CFI conversion accuracy is covered by the xcfi and
@@ -49,6 +49,35 @@ describe('getRemoteLocalFraction', () => {
     ).toBeUndefined();
     expect(await getRemoteLocalFraction({ progress: undefined }, view, bookDoc)).toBeUndefined();
     expect(mockGetCFIFromXPointer).not.toHaveBeenCalled();
+  });
+
+  // An XPointer names a node in the document it was written against. When the
+  // server matched the writer on nothing stronger than a file name, the
+  // position is not this book's and its percentage is the only comparable
+  // signal — the same treatment a non-XPointer format gets.
+  it('returns undefined for a position matched on a weak identifier', async () => {
+    const view = makeView(0.42);
+
+    expect(
+      await getRemoteLocalFraction(
+        { progress: XPOINTER, percentage: 0.5, progress_match: 'filename' },
+        view,
+        bookDoc,
+      ),
+    ).toBeUndefined();
+    expect(mockGetCFIFromXPointer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, true],
+    ['content', true],
+    ['structure', true],
+    ['filename', false],
+    ['none', false],
+  ])('follows an XPointer matched on %s: %s', (progressMatch, followable) => {
+    expect(isFollowablePosition({ progress: XPOINTER, progress_match: progressMatch })).toBe(
+      followable,
+    );
   });
 
   it('returns undefined when the XPointer cannot be converted to a local CFI', async () => {

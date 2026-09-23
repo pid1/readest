@@ -81,6 +81,7 @@ export const DEFAULT_KOSYNC_SETTINGS = {
   checksumMethod: 'binary',
   strategy: 'prompt',
   sendMetadata: false,
+  matchIdentifiers: false,
   enabled: false,
 } as KOSyncSettings;
 

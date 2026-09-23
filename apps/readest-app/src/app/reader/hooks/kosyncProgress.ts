@@ -2,6 +2,7 @@ import { BookDoc } from '@/libs/document';
 import { FoliateView } from '@/types/view';
 import { getCFIFromXPointer } from '@/utils/xcfi';
 import { KoSyncProgress } from '@/services/sync/KOSyncClient';
+import { canFollowPosition } from '@/services/sync/kosyncIdentifiers';
 
 /**
  * True when a KOSync `progress` string is a CREngine XPointer — KOReader's
@@ -15,6 +16,16 @@ import { KoSyncProgress } from '@/services/sync/KOSyncClient';
  */
 export const isXPointerProgress = (progress?: string): boolean =>
   !!progress && progress.startsWith('/body');
+
+/**
+ * True when the stored position may be applied as a position: it is an
+ * XPointer, and the server either reports no identifier match (it does not
+ * implement the extension) or reports one that addresses the document's own
+ * bytes. A position written against a copy that only shares a file name names
+ * a node this book need not have, so its percentage is all that carries over.
+ */
+export const isFollowablePosition = (remote: KoSyncProgress): boolean =>
+  isXPointerProgress(remote.progress) && canFollowPosition(remote.progress_match);
 
 /**
  * Remote reading completion as a 0–1 fraction suitable for
@@ -42,8 +53,10 @@ export const getRemoteFraction = (remote: KoSyncProgress): number | undefined =>
  *                    CFI resolves to no local progress). This is common on iOS
  *                    (WKWebView) and is often a symptom of the DocFragment↔spine
  *                    drift (Bug A). It is NOT the same as "no conflict".
- * - `not-xpointer` — the server reported progress in a format Readest can't
- *                    resolve positionally (e.g. Kavita). The reported
+ * - `not-xpointer` — the position cannot be resolved positionally: a format
+ *                    Readest can't read (e.g. Kavita), or an XPointer written
+ *                    against a copy the server matched on an identifier that
+ *                    says nothing about this file's bytes. The reported
  *                    percentage is the only comparable signal.
  */
 export type RemoteFractionResolution =
@@ -69,7 +82,7 @@ export const resolveRemoteLocalFraction = async (
   view: FoliateView,
   bookDoc: BookDoc,
 ): Promise<RemoteFractionResolution> => {
-  if (!isXPointerProgress(remote.progress)) return { status: 'not-xpointer' };
+  if (!isFollowablePosition(remote)) return { status: 'not-xpointer' };
   try {
     // Resolve against the XPointer's own spine section; the converter loads the
     // correct off-screen document when it differs from the primary view.

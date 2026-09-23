@@ -4,8 +4,14 @@ import { KOSyncSettings } from '@/types/settings';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { KoSyncProxyPayload } from '@/types/kosync';
 import { isLanAddress } from '@/utils/network';
-import { getUserLang, makeSafeFilename } from '@/utils/misc';
+import { getUserLang } from '@/utils/misc';
 import { normalizeCustomHeaders } from '@/utils/customHeaders';
+import {
+  formatIdentifiersParam,
+  getKOSyncFilename,
+  normalizeIdentifiers,
+  type KOSyncIdentifier,
+} from './kosyncIdentifiers';
 import { getAPIBaseUrl, isTauriAppPlatform } from '../environment';
 
 const getContributorName = (contributor: unknown): string => {
@@ -44,6 +50,14 @@ export interface KoSyncProgress {
   timestamp?: number;
   device?: string;
   device_id?: string;
+  /**
+   * The identifier type that found the record, and the strongest identifier
+   * shared with whoever wrote the position stored there (`"none"` for none at
+   * all). Both are absent from a server that does not implement identifier
+   * matching, and from a request that named no identifiers.
+   */
+  match?: string;
+  progress_match?: string;
 }
 
 export class KOSyncClient {
@@ -203,16 +217,20 @@ export class KOSyncClient {
   /**
    * Retrieves the reading progress for a specific book from the server
    * @param book - The book to get progress for
+   * @param identifiers - Other names this copy is known by, strongest first
    * @returns Promise with the progress data or null if not found
    */
-  async getProgress(book: Book): Promise<KoSyncProgress | null> {
+  async getProgress(book: Book, identifiers?: KOSyncIdentifier[]): Promise<KoSyncProgress | null> {
     if (!this.config.userkey) return null;
 
     const documentHash = this.getDocumentDigest(book);
     if (!documentHash) return null;
 
+    const ids = identifiers && normalizeIdentifiers(identifiers, documentHash);
+    const query = ids ? `?ids=${formatIdentifiersParam(ids)}` : '';
+
     try {
-      const response = await this.request(`/syncs/progress/${documentHash}`);
+      const response = await this.request(`/syncs/progress/${documentHash}${query}`);
 
       if (!response.ok) {
         console.error(
@@ -244,18 +262,30 @@ export class KOSyncClient {
    * @param book - The book to update progress for
    * @param progress - The current reading progress position
    * @param percentage - The reading completion percentage
+   * @param identifiers - Other names this copy is known by, strongest first
    * @returns Promise with boolean indicating success
    */
-  async updateProgress(book: Book, progress: string, percentage: number): Promise<boolean> {
+  async updateProgress(
+    book: Book,
+    progress: string,
+    percentage: number,
+    identifiers?: KOSyncIdentifier[],
+  ): Promise<boolean> {
     if (!this.config.userkey) return false;
 
     const documentHash = this.getDocumentDigest(book);
     if (!documentHash) return false;
 
+    const ids = identifiers && normalizeIdentifiers(identifiers, documentHash);
+
     const payload = {
       document: documentHash,
       progress,
       percentage,
+      // The optional identifier list of koreader-sync-server#55: the names
+      // this copy is also known by, in the order the server should try them.
+      // A server without the feature ignores the field.
+      ...(ids && { identifiers: ids }),
       device: this.config.deviceName,
       device_id: this.config.deviceId,
       // The optional metadata field KOReader 2026.05+ sends when "Send
@@ -265,12 +295,11 @@ export class KOSyncClient {
       // `authors` is a single string in KOReader's format, newline-joined
       // when there are several. Book.author uses locale-specific display
       // punctuation, so recover the individual names from structured metadata.
-      // The extension is the lowercased format, the same value as EXTS in
-      // libs/document, not imported here so this client stays off the document
-      // lib's foliate-js dependency chain.
+      // `filename` is the string the `filename` identifier digests, so the
+      // two names a server sees for one copy cannot drift apart.
       ...(this.config.sendMetadata && {
         metadata: {
-          filename: `${makeSafeFilename(book.sourceTitle || book.title)}.${book.format.toLowerCase()}`,
+          filename: getKOSyncFilename(book),
           title: book.title,
           authors: getMetadataAuthors(book),
         },
