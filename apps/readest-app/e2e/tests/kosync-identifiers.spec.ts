@@ -100,7 +100,7 @@ test.describe('KOSync identifier matching', () => {
     await device.context.close();
   });
 
-  test('with the toggle on a push offers content and structure, strongest first', async ({
+  test('with the toggle on a push offers content, structure and metadata, strongest first', async ({
     browser,
   }) => {
     const device = await openDevice(browser, {
@@ -114,12 +114,20 @@ test.describe('KOSync identifier matching', () => {
     const identifiers = put.body!['identifiers'] as {
       type: string;
       value: string;
+      weak?: boolean;
     }[];
-    expect(identifiers).toHaveLength(2);
+    expect(identifiers).toHaveLength(3);
     // [K-ID-5b]: strongest first.
     expect(identifiers[0]).toEqual({ type: 'content', value: document });
     expect(identifiers[1]!.type).toBe('structure');
     expect(identifiers[1]!.value).toMatch(HEX32);
+    expect(identifiers[2]!.type).toBe('metadata');
+    expect(identifiers[2]!.value).toMatch(HEX32);
+    // [K-ID-16]: a title and author can belong to two different works, so the
+    // body says the entry may seed this copy and may not claim a record.
+    expect(identifiers[2]!.weak).toBe(true);
+    expect(identifiers[0]!.weak).toBeUndefined();
+    expect(identifiers[1]!.weak).toBeUndefined();
     // [K-ID-15]: Readest cannot reconstruct the name the file was imported
     // under, so it offers no `filename` rather than an approximation of one.
     expect(identifiers.map((i) => i.type)).not.toContain('filename');
@@ -136,11 +144,14 @@ test.describe('KOSync identifier matching', () => {
     ]);
     expect(viaAlias).toMatchObject({ document, match: 'structure' });
 
-    // The read the app makes carries the same list, in the same order.
+    // The read the app makes carries the same list, in the same order, and the
+    // `ids` grammar has no place for the weak flag.
     const get = device.log.progressGets()[0]!;
     expect(get.endpoint).toBe(
-      `/syncs/progress/${document}?ids=content:${document},structure:${structure}`,
+      `/syncs/progress/${document}?ids=content:${document},structure:${structure},` +
+        `metadata:${identifiers[2]!.value}`,
     );
+    expect(get.endpoint).not.toContain('weak');
     await device.context.close();
   });
 
@@ -155,7 +166,9 @@ test.describe('KOSync identifier matching', () => {
     await original.reader.goToPage(target);
     const put = await waitForProgressPut(original);
     const documentA = put.body!['document'] as string;
-    const structure = (put.body!['identifiers'] as { value: string }[])[1]!.value;
+    const sent = put.body!['identifiers'] as { value: string }[];
+    const structure = sent[1]!.value;
+    const metadata = sent[2]!.value;
     const sectionA = await spineIndex(original.page);
     const fractionA =
       (await original.reader.readingProgress()) / (await totalPages(original.reader));
@@ -174,7 +187,8 @@ test.describe('KOSync identifier matching', () => {
 
     expect(documentB, 'the copy is a different file').not.toBe(documentA);
     expect(get.endpoint).toBe(
-      `/syncs/progress/${documentB}?ids=content:${documentB},structure:${structure}`,
+      `/syncs/progress/${documentB}?ids=content:${documentB},structure:${structure},` +
+        `metadata:${metadata}`,
     );
     // [K-ID-4] / [K-ID-6]: found by the spine, and the position was written by
     // something that shares it.

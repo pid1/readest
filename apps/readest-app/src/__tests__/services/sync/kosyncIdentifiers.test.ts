@@ -8,7 +8,7 @@ import { md5 } from 'js-md5';
 import {
   buildIdentifiers,
   canFollowPosition,
-  computeStructureDigest,
+  computeOpfDigests,
   formatIdentifiersParam,
   normalizeIdentifiers,
 } from '@/services/sync/kosyncIdentifiers';
@@ -26,6 +26,9 @@ const CONTAINER = `<?xml version="1.0" encoding="UTF-8"?>
 // null for a name the archive does not hold.
 const epub = (files: Record<string, string>) =>
   ({ loadText: async (name: string) => files[name] ?? null }) as BookDoc;
+
+const structureOf = async (bookDoc: BookDoc) => (await computeOpfDigests(bookDoc)).structure;
+const metadataOf = async (bookDoc: BookDoc) => (await computeOpfDigests(bookDoc)).metadata;
 
 const book = (overrides: Partial<Book> = {}): Book =>
   ({
@@ -57,7 +60,7 @@ describe('the structure digest', () => {
     const lines = 'Text/a%20b.xhtml\nText/c&d.xhtml\n../Text/e.xhtml';
     expect(new TextEncoder().encode(lines)).toHaveLength(47);
     expect(md5(lines)).toBe('e07ad0e2e24fbaa64b0c40a8b1ebb13f');
-    await expect(computeStructureDigest(file)).resolves.toBe('e07ad0e2e24fbaa64b0c40a8b1ebb13f');
+    await expect(structureOf(file)).resolves.toBe('e07ad0e2e24fbaa64b0c40a8b1ebb13f');
   });
 
   // The identifier line is the one `unique-identifier` names, with numeric
@@ -79,7 +82,7 @@ describe('the structure digest', () => {
     const lines = 'urn:a&b:1\nch1.xhtml';
     expect(new TextEncoder().encode(lines)).toHaveLength(19);
     expect(md5(lines)).toBe('fb3ed76af6e07f28456616a77330b19f');
-    await expect(computeStructureDigest(file)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
+    await expect(structureOf(file)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
   });
 
   it('falls back to the first non-empty identifier when none is named', async () => {
@@ -96,7 +99,7 @@ describe('the structure digest', () => {
 </package>`,
     });
 
-    await expect(computeStructureDigest(named)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
+    await expect(structureOf(named)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
   });
 
   it('skips a spine entry that resolves to no manifest item', async () => {
@@ -119,12 +122,12 @@ describe('the structure digest', () => {
 </opf:package>`,
     });
 
-    await expect(computeStructureDigest(file)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
+    await expect(structureOf(file)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
   });
 
   it('has no digest for a container that is not an OPF-bearing archive', async () => {
-    await expect(computeStructureDigest(epub({}))).resolves.toBeNull();
-    await expect(computeStructureDigest({} as BookDoc)).resolves.toBeNull();
+    await expect(structureOf(epub({}))).resolves.toBeNull();
+    await expect(structureOf({} as BookDoc)).resolves.toBeNull();
   });
 
   // The rest of this suite hands the digest a loader directly; this one opens
@@ -157,7 +160,63 @@ describe('the structure digest', () => {
     const file = new File([await writer.close()], 'one.epub', { type: 'application/epub+zip' });
 
     const { book } = await new DocumentLoader(file).open();
-    await expect(computeStructureDigest(book)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
+    await expect(structureOf(book)).resolves.toBe('fb3ed76af6e07f28456616a77330b19f');
+  });
+});
+
+describe('the metadata digest', () => {
+  const opf = (metadata: string) =>
+    epub({
+      'META-INF/container.xml': CONTAINER,
+      'OEBPS/content.opf': `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="pid">urn:a&amp;b&#58;1</dc:identifier>
+    ${metadata}
+  </metadata>
+  <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>`,
+    });
+
+  it('digests the title and the authors', async () => {
+    const line = 'title:leaves of grass\nauthors:walt whitman';
+    expect(md5(line)).toBe('e31fbadda910cfd764fb8c03b8cf4e03');
+    await expect(
+      metadataOf(opf('<dc:title>Leaves of Grass</dc:title><dc:creator>Walt Whitman</dc:creator>')),
+    ).resolves.toBe('e31fbadda910cfd764fb8c03b8cf4e03');
+  });
+
+  it('ignores case, padding and author order', async () => {
+    const line = 'title:good omens\nauthors:neil gaiman;terry pratchett';
+    await expect(
+      metadataOf(
+        opf(
+          '<dc:title>  GOOD\tOmens </dc:title>' +
+            '<dc:creator>Terry  Pratchett</dc:creator><dc:creator> neil gaiman </dc:creator>',
+        ),
+      ),
+    ).resolves.toBe(md5(line));
+  });
+
+  // The first title is the book's; the ones after it are subtitles.
+  it('takes the first title and every creator', async () => {
+    await expect(
+      metadataOf(
+        opf(
+          '<dc:title>Leaves of Grass</dc:title><dc:title>A Subtitle</dc:title>' +
+            '<dc:creator>Walt Whitman</dc:creator><dc:contributor>A Publisher</dc:contributor>',
+        ),
+      ),
+    ).resolves.toBe('e31fbadda910cfd764fb8c03b8cf4e03');
+  });
+
+  it('has none for a title with no author, and none for no title', async () => {
+    await expect(metadataOf(opf('<dc:title>Leaves of Grass</dc:title>'))).resolves.toBeNull();
+    await expect(
+      metadataOf(opf('<dc:title>  </dc:title><dc:creator>Walt Whitman</dc:creator>')),
+    ).resolves.toBeNull();
+    await expect(metadataOf(epub({}))).resolves.toBeNull();
   });
 });
 
@@ -183,6 +242,36 @@ describe('the identifier list', () => {
     expect(normalizeIdentifiers(identifiers, 'a'.repeat(32))).toEqual(identifiers);
     expect(formatIdentifiersParam(identifiers)).toBe(
       `content:${'a'.repeat(32)},structure:fb3ed76af6e07f28456616a77330b19f`,
+    );
+  });
+
+  // Every identifier Readest can offer, with the one that can name a different
+  // work marked so the server seeds from it and does not adopt on it.
+  it('marks metadata weak, and leaves the flag out of the query', async () => {
+    const file = epub({
+      'META-INF/container.xml': CONTAINER,
+      'OEBPS/content.opf': `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="pid">urn:a&amp;b&#58;1</dc:identifier>
+    <dc:title>Leaves of Grass</dc:title>
+    <dc:creator>Walt Whitman</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>`,
+    });
+
+    const identifiers = await buildIdentifiers(book({ hash: 'f'.repeat(32) }), file);
+    expect(identifiers).toEqual([
+      { type: 'content', value: 'f'.repeat(32) },
+      { type: 'structure', value: 'fb3ed76af6e07f28456616a77330b19f' },
+      { type: 'metadata', value: 'e31fbadda910cfd764fb8c03b8cf4e03', weak: true },
+    ]);
+    expect(normalizeIdentifiers(identifiers, 'f'.repeat(32))).toEqual(identifiers);
+    expect(formatIdentifiersParam(identifiers)).toBe(
+      `content:${'f'.repeat(32)},structure:fb3ed76af6e07f28456616a77330b19f,` +
+        'metadata:e31fbadda910cfd764fb8c03b8cf4e03',
     );
   });
 

@@ -7,29 +7,56 @@ import { makeSafeFilename } from '@/utils/misc';
 /**
  * One entry of the optional identifier list both KOSync progress endpoints
  * accept (koreader/koreader-sync-server#55). The server treats `type` as an
- * opaque label, so the three below are a client-side agreement: `content` is
+ * opaque label, so the four below are a client-side agreement: `content` is
  * the partial MD5 the protocol already addresses documents by, `structure` is
- * a digest over the EPUB spine, `filename` a digest over the file name.
+ * a digest over the EPUB spine, `metadata` one over the title and the authors,
+ * `filename` one over the file name.
+ *
+ * `weak` marks a label that can name a different work ([K-ID-16]). It belongs
+ * to the PUT body alone: a write resolving only through a weak entry writes
+ * under `document` instead of adopting the record it reached ([K-ID-17]), and
+ * a read adopts nothing, so the `ids` grammar has no equivalent.
  */
 export interface KOSyncIdentifier {
   type: KOSyncIdentifierType;
   value: string;
+  weak?: boolean;
 }
 
-export type KOSyncIdentifierType = 'content' | 'structure' | 'filename';
+export type KOSyncIdentifierType = 'content' | 'structure' | 'metadata' | 'filename';
 
 /** Most specific to the file in hand first, as the wire order must be. */
-const IDENTIFIER_STRENGTH: KOSyncIdentifierType[] = ['content', 'structure', 'filename'];
+const IDENTIFIER_STRENGTH: KOSyncIdentifierType[] = [
+  'content',
+  'structure',
+  'metadata',
+  'filename',
+];
+
+/**
+ * Labels that can match a different work, which the PUT body says so the
+ * server does not let one claim an existing record. `metadata` names a work
+ * rather than a file, and two books a library tagged alike carry the same one.
+ */
+const WEAK_TYPES = new Set<KOSyncIdentifierType>(['metadata']);
 
 /**
  * Identifier types that address the bytes a position was written against, so a
- * stored `progress` string still names the same node. `filename` and anything
- * a future client invents do not: a shared name says nothing about the
- * document, and following an XPointer on that basis lands in an arbitrary
- * place. A server without the feature reports no match at all, which stays on
- * the pre-feature path.
+ * stored `progress` string still names the same node. `metadata`, `filename`
+ * and anything a future client invents do not: a shared work or name says
+ * nothing about the document, and following an XPointer on that basis lands in
+ * an arbitrary place. A server without the feature reports no match at all,
+ * which stays on the pre-feature path.
  */
 const POSITIONAL_MATCH_TYPES = new Set<string>(['content', 'structure']);
+
+/** The identifiers an EPUB's package document yields, `null` where it yields none. */
+export interface KOSyncOpfDigests {
+  structure: string | null;
+  metadata: string | null;
+}
+
+const NO_DIGESTS: KOSyncOpfDigests = { structure: null, metadata: null };
 
 /** Server-side limits; a list that breaks one is answered 403. */
 const MAX_IDENTIFIERS = 8;
@@ -38,6 +65,10 @@ const VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** The XML whitespace set, which is narrower than `String.prototype.trim`. */
 const trimXml = (value: string) => value.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '');
+
+/** Case folded, runs of whitespace collapsed, trimmed, as the recipe reads. */
+const normalizeMetadataText = (value: string) =>
+  trimXml(value.toLowerCase().replace(/[ \t\r\n]+/g, ' '));
 
 /**
  * Whether a stored position may be followed given the type the server matched
@@ -92,7 +123,10 @@ export const normalizeIdentifiers = (
   return valid;
 };
 
-/** The `ids` query parameter: `type:value,type:value`, in list order. */
+/**
+ * The `ids` query parameter: `type:value,type:value`, in list order. A read
+ * adopts nothing, so `weak` has no place in the grammar and is dropped here.
+ */
 export const formatIdentifiersParam = (identifiers: KOSyncIdentifier[]): string =>
   identifiers.map(({ type, value }) => `${type}:${value}`).join(',');
 
@@ -168,67 +202,103 @@ const getStructureLines = (opf: Document): string[] | null => {
 };
 
 /**
- * md5 over the spine of an EPUB, which survives a recompression that rewrites
- * every entry's bytes and changes when the edition or the chapter list does.
- * `null` for a container that is not an OPF-bearing archive, so the identifier
- * is omitted rather than guessed. Reads the two entries through the book's own
- * container loader, which on the desktop and mobile apps already holds them
- * from the Rust EPUB prefetch.
+ * The line the `metadata` digest is taken over: the first `dc:title`, then the
+ * `dc:creator`s sorted, each lowercased with runs of whitespace collapsed and
+ * trimmed. A title with no author names a shelf of editions and reprints
+ * rather than a work, so it yields nothing.
  */
-export const computeStructureDigest = async (bookDoc: BookDoc): Promise<string | null> => {
+const getMetadataLine = (opf: Document): string | null => {
+  const pkg = opf.documentElement;
+  if (!pkg) return null;
+  const metadata = firstNamed(pkg, 'metadata');
+  if (!metadata) return null;
+
+  const title = normalizeMetadataText(childrenNamed(metadata, 'title')[0]?.textContent ?? '');
+  if (!title) return null;
+
+  const authors = childrenNamed(metadata, 'creator')
+    .map((creator) => normalizeMetadataText(creator.textContent ?? ''))
+    .filter(Boolean)
+    .sort();
+  if (authors.length === 0) return null;
+
+  return `title:${title}\nauthors:${authors.join(';')}`;
+};
+
+/**
+ * The two digests an EPUB's package document yields, each `null` when the
+ * recipe reaches nothing, so the identifier is omitted rather than guessed.
+ *
+ * `structure` is md5 over the spine, which survives a recompression that
+ * rewrites every entry's bytes and changes when the edition or the chapter
+ * list does. `metadata` is md5 over the title and the authors, which survives
+ * the spine changing and so is the one a conversion that re-chunked it keeps.
+ *
+ * Reads the two entries through the book's own container loader, which on the
+ * desktop and mobile apps already holds them from the Rust EPUB prefetch.
+ */
+export const computeOpfDigests = async (bookDoc: BookDoc): Promise<KOSyncOpfDigests> => {
   const { loadText } = bookDoc;
-  if (!loadText) return null;
+  if (!loadText) return NO_DIGESTS;
   try {
     const containerText = await loadText('META-INF/container.xml');
-    if (!containerText) return null;
+    if (!containerText) return NO_DIGESTS;
     const container = parseXml(containerText);
-    if (!container) return null;
+    if (!container) return NO_DIGESTS;
     const opfPath = getOpfPath(container);
-    if (!opfPath) return null;
+    if (!opfPath) return NO_DIGESTS;
 
     const opfText = await loadText(opfPath);
-    if (!opfText) return null;
+    if (!opfText) return NO_DIGESTS;
     const opf = parseXml(opfText);
-    if (!opf) return null;
+    if (!opf) return NO_DIGESTS;
 
     const lines = getStructureLines(opf);
-    return lines ? md5(lines.join('\n')) : null;
+    const metadataLine = getMetadataLine(opf);
+    return {
+      structure: lines ? md5(lines.join('\n')) : null,
+      metadata: metadataLine ? md5(metadataLine) : null,
+    };
   } catch (error) {
-    console.error('KOSync: failed to read the EPUB spine', error);
-    return null;
+    console.error('KOSync: failed to read the EPUB package document', error);
+    return NO_DIGESTS;
   }
 };
 
 // Every push and pull asks for the same answer for as long as the book is
 // open, and each one costs two inflates.
-const structureDigests = new Map<string, Promise<string | null>>();
+const opfDigests = new Map<string, Promise<KOSyncOpfDigests>>();
 
-const getStructureDigest = (book: Book, bookDoc: BookDoc): Promise<string | null> => {
-  const cached = structureDigests.get(book.hash);
+const getOpfDigests = (book: Book, bookDoc: BookDoc): Promise<KOSyncOpfDigests> => {
+  const cached = opfDigests.get(book.hash);
   if (cached) return cached;
-  const digest = computeStructureDigest(bookDoc);
-  structureDigests.set(book.hash, digest);
-  return digest;
+  const digests = computeOpfDigests(bookDoc);
+  opfDigests.set(book.hash, digests);
+  return digests;
 };
 
 /**
  * The identifiers this device can offer for a book, strongest first, or an
  * empty list when it has nothing to add to the digest the record is already
  * addressed by. `content` is that digest, so a non-empty list always names
- * `document`; `structure` is present for EPUBs whose spine could be read.
+ * `document`; `structure` and `metadata` are present for EPUBs whose package
+ * document could be read.
  */
 export const buildIdentifiers = async (
   book: Book,
   bookDoc: BookDoc | null,
 ): Promise<KOSyncIdentifier[]> => {
+  const digests = bookDoc ? await getOpfDigests(book, bookDoc) : NO_DIGESTS;
   const values: Partial<Record<KOSyncIdentifierType, string | null>> = {
     content: book.hash,
-    structure: bookDoc ? await getStructureDigest(book, bookDoc) : null,
+    structure: digests.structure,
+    metadata: digests.metadata,
     filename: getFilenameDigest(book),
   };
   const identifiers = IDENTIFIER_STRENGTH.flatMap((type) => {
     const value = values[type];
-    return value ? [{ type, value }] : [];
+    if (!value) return [];
+    return [WEAK_TYPES.has(type) ? { type, value, weak: true } : { type, value }];
   });
   // A list naming nothing but the content digest says no more than `document`
   // already does, so there is nothing to offer.

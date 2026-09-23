@@ -98,9 +98,9 @@ export interface KOSyncSettings {
   sendMetadata?: boolean;
   /**
    * Offer the other names a copy is known by — a digest over the EPUB spine
-   * and one over the file name — beside the content digest, in the optional
-   * `identifiers` list of koreader-sync-server#55, so a re-downloaded or
-   * converted copy finds the position stored for the original. Servers
+   * and one over its title and authors — beside the content digest, in the
+   * optional `identifiers` list of koreader-sync-server#55, so a re-downloaded
+   * or converted copy finds the position stored for the original. Servers
    * without the feature ignore both the field and the query parameter. Off by
    * default, like `sendMetadata`.
    */

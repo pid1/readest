@@ -261,8 +261,8 @@ const KOSyncForm: React.FC<KOSyncFormProps> = ({ onBack }) => {
                 />
               </label>
               {/* Offers a digest over the book's chapter list and one over
-                  its file name alongside the content digest, so a copy that
-                  differs byte-for-byte still finds its place. Servers that
+                  its title and authors alongside the content digest, so a copy
+                  that differs byte-for-byte still finds its place. Servers that
                   don't implement the extension ignore it. Off by default,
                   like Send Document Metadata. */}
               <label className='flex min-h-14 items-center justify-between px-4'>
